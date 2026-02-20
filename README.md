@@ -113,6 +113,10 @@ hal-contract/
 └── examples/rust-mock/     # Minimal mock backend example
 ```
 
+## Roadmap
+
+See [`ROADMAP.md`](ROADMAP.md) for the full backend integration roadmap, including technical assessments of Quantinuum, AQT, planqc, PASQAL, Quandela, and why providers like D-Wave, Google, and Xanadu are excluded.
+
 ## Reference Gate Sets
 
 Built-in presets for common quantum hardware:
