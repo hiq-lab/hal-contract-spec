@@ -1,0 +1,575 @@
+//! Backend capability introspection.
+//!
+//! This module defines the types that describe what a quantum backend can do:
+//! qubit count, supported gates, connectivity topology, and hardware noise
+//! characteristics. Compilers use these to decide transpilation strategy;
+//! orchestrators use them for routing decisions.
+//!
+//! # HAL Contract v2
+//!
+//! The following types are part of the HAL Contract v2 specification:
+//! - [`Capabilities`] — top-level hardware descriptor
+//! - [`GateSet`] — supported gate operations (OpenQASM 3 naming)
+//! - [`Topology`] / [`TopologyKind`] — qubit connectivity graph
+//! - [`NoiseProfile`] — device-wide noise averages
+//!
+//! All edges in [`Topology`] are bidirectional: if `(a, b)` is present,
+//! both `a → b` and `b → a` are valid two-qubit interactions.
+
+use serde::{Deserialize, Serialize};
+
+/// Hardware capabilities of a quantum backend.
+///
+/// Describes what a backend can do: qubit count, supported gates,
+/// connectivity, shot limits, and noise characteristics. Compilers
+/// use this for transpilation decisions; orchestrators use it for
+/// backend routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// Name of the backend.
+    pub name: String,
+    /// Number of qubits available.
+    pub num_qubits: u32,
+    /// Supported gate set (OpenQASM 3 naming convention).
+    pub gate_set: GateSet,
+    /// Qubit connectivity topology. All edges are bidirectional.
+    pub topology: Topology,
+    /// Maximum number of shots per job.
+    pub max_shots: u32,
+    /// Whether this is a simulator (not real hardware).
+    pub is_simulator: bool,
+    /// Additional features supported by this backend.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    /// Device-wide noise averages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_profile: Option<NoiseProfile>,
+}
+
+impl Capabilities {
+    /// Create capabilities for a simulator.
+    pub fn simulator(num_qubits: u32) -> Self {
+        Self {
+            name: "simulator".into(),
+            num_qubits,
+            gate_set: GateSet::universal(),
+            topology: Topology::full(num_qubits),
+            max_shots: 100_000,
+            is_simulator: true,
+            features: vec!["statevector".into(), "unitary".into()],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for IQM devices (e.g., Garnet, Adonis).
+    pub fn iqm(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::iqm(),
+            topology: Topology::star(num_qubits),
+            max_shots: 20_000,
+            is_simulator: false,
+            features: vec![],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for IBM Eagle processors (127 qubits, ECR native).
+    pub fn ibm_eagle(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::ibm_eagle(),
+            topology: Topology::custom(vec![]), // Use with_topology() for real connectivity
+            max_shots: 100_000,
+            is_simulator: false,
+            features: vec!["dynamic_circuits".into()],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for IBM Heron processors (156 qubits, CZ native).
+    pub fn ibm_heron(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::ibm_heron(),
+            topology: Topology::custom(vec![]), // Use with_topology() for real connectivity
+            max_shots: 100_000,
+            is_simulator: false,
+            features: vec!["dynamic_circuits".into()],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for a neutral-atom device (e.g., planqc, Pasqal).
+    pub fn neutral_atom(name: impl Into<String>, num_qubits: u32, zones: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::neutral_atom(),
+            topology: Topology::neutral_atom(num_qubits, zones),
+            max_shots: 100_000,
+            is_simulator: false,
+            features: vec!["shuttling".into(), "zoned".into()],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for Rigetti devices (superconducting).
+    pub fn rigetti(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::rigetti(),
+            topology: Topology::grid(
+                f64::from(num_qubits).sqrt().ceil() as u32,
+                f64::from(num_qubits).sqrt().ceil() as u32,
+            ),
+            max_shots: 100_000,
+            is_simulator: false,
+            features: vec![],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for IonQ devices (trapped-ion).
+    pub fn ionq(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::ionq(),
+            topology: Topology::full(num_qubits),
+            max_shots: 100_000,
+            is_simulator: false,
+            features: vec![],
+            noise_profile: None,
+        }
+    }
+
+    /// Override the topology with real hardware connectivity.
+    pub fn with_topology(mut self, topology: Topology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    /// Attach a noise profile to these capabilities.
+    pub fn with_noise_profile(mut self, profile: NoiseProfile) -> Self {
+        self.noise_profile = Some(profile);
+        self
+    }
+}
+
+/// Gate set supported by a backend.
+///
+/// Gate names follow the OpenQASM 3 naming convention (lowercase):
+/// `h`, `cx`, `rz`, `prx`, etc.
+///
+/// The `native` list identifies gates that execute without decomposition.
+/// If `native` is empty, all supported gates are considered native
+/// (typical for simulators).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateSet {
+    /// Single-qubit gates supported.
+    pub single_qubit: Vec<String>,
+    /// Two-qubit gates supported.
+    pub two_qubit: Vec<String>,
+    /// Three-qubit gates supported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub three_qubit: Vec<String>,
+    /// Native gates (execute without decomposition on this backend).
+    pub native: Vec<String>,
+}
+
+impl GateSet {
+    /// Create IQM gate set (PRX + CZ native).
+    pub fn iqm() -> Self {
+        Self {
+            single_qubit: vec!["prx".into()],
+            two_qubit: vec!["cz".into()],
+            three_qubit: vec![],
+            native: vec!["prx".into(), "cz".into()],
+        }
+    }
+
+    /// Create IBM Eagle gate set (127-qubit processors: ibm_brussels, ibm_strasbourg, etc.).
+    ///
+    /// Eagle native gates: `ecr, rz, sx, x`.
+    pub fn ibm_eagle() -> Self {
+        Self {
+            single_qubit: vec!["rz".into(), "sx".into(), "x".into(), "id".into()],
+            two_qubit: vec!["ecr".into()],
+            three_qubit: vec![],
+            native: vec!["rz".into(), "sx".into(), "x".into(), "ecr".into()],
+        }
+    }
+
+    /// Create IBM Heron gate set (156-qubit processors: ibm_torino, ibm_marrakesh, etc.).
+    ///
+    /// Heron native gates: `cz, rz, sx, x`. Also supports `rx`, `rzz`, `h`.
+    pub fn ibm_heron() -> Self {
+        Self {
+            single_qubit: vec![
+                "rz".into(),
+                "sx".into(),
+                "x".into(),
+                "id".into(),
+                "rx".into(),
+                "h".into(),
+            ],
+            two_qubit: vec!["cz".into(), "rzz".into()],
+            three_qubit: vec![],
+            native: vec![
+                "rz".into(),
+                "sx".into(),
+                "x".into(),
+                "cz".into(),
+                "id".into(),
+                "rx".into(),
+                "h".into(),
+                "rzz".into(),
+            ],
+        }
+    }
+
+    /// Create universal gate set (all standard gates, typical for simulators).
+    pub fn universal() -> Self {
+        Self {
+            single_qubit: vec![
+                "id".into(),
+                "x".into(),
+                "y".into(),
+                "z".into(),
+                "h".into(),
+                "s".into(),
+                "sdg".into(),
+                "t".into(),
+                "tdg".into(),
+                "sx".into(),
+                "sxdg".into(),
+                "rx".into(),
+                "ry".into(),
+                "rz".into(),
+                "p".into(),
+                "u".into(),
+                "prx".into(),
+            ],
+            two_qubit: vec![
+                "cx".into(),
+                "cy".into(),
+                "cz".into(),
+                "ch".into(),
+                "swap".into(),
+                "iswap".into(),
+                "crx".into(),
+                "cry".into(),
+                "crz".into(),
+                "cp".into(),
+                "rxx".into(),
+                "ryy".into(),
+                "rzz".into(),
+            ],
+            three_qubit: vec!["ccx".into(), "cswap".into()],
+            native: vec![],
+        }
+    }
+
+    /// Create Rigetti gate set (RX, RZ, CZ native).
+    pub fn rigetti() -> Self {
+        Self {
+            single_qubit: vec!["rx".into(), "rz".into()],
+            two_qubit: vec!["cz".into()],
+            three_qubit: vec![],
+            native: vec!["rx".into(), "rz".into(), "cz".into()],
+        }
+    }
+
+    /// Create IonQ gate set (RX, RY, RZ, XX native).
+    pub fn ionq() -> Self {
+        Self {
+            single_qubit: vec!["rx".into(), "ry".into(), "rz".into()],
+            two_qubit: vec!["xx".into()],
+            three_qubit: vec![],
+            native: vec!["rx".into(), "ry".into(), "rz".into(), "xx".into()],
+        }
+    }
+
+    /// Create a neutral-atom gate set (RZ, RX, RY, CZ native).
+    pub fn neutral_atom() -> Self {
+        Self {
+            single_qubit: vec!["rz".into(), "rx".into(), "ry".into()],
+            two_qubit: vec!["cz".into()],
+            three_qubit: vec![],
+            native: vec!["rz".into(), "rx".into(), "ry".into(), "cz".into()],
+        }
+    }
+
+    /// Check if a gate is supported (single-qubit, two-qubit, or three-qubit).
+    pub fn contains(&self, gate: &str) -> bool {
+        self.single_qubit.iter().any(|g| g == gate)
+            || self.two_qubit.iter().any(|g| g == gate)
+            || self.three_qubit.iter().any(|g| g == gate)
+    }
+
+    /// Check if a gate is native (executes without decomposition).
+    ///
+    /// If the `native` list is empty, all supported gates are considered
+    /// native — this is the typical case for simulators.
+    pub fn is_native(&self, gate: &str) -> bool {
+        if self.native.is_empty() {
+            self.contains(gate)
+        } else {
+            self.native.iter().any(|g| g == gate)
+        }
+    }
+}
+
+/// Qubit connectivity topology.
+///
+/// All edges are bidirectional: if `(a, b)` is listed, both `a → b`
+/// and `b → a` are valid two-qubit interactions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Topology {
+    /// Kind of topology.
+    pub kind: TopologyKind,
+    /// Coupling edges (pairs of connected qubits). Bidirectional.
+    pub edges: Vec<(u32, u32)>,
+}
+
+impl Topology {
+    /// Create a linear topology.
+    pub fn linear(n: u32) -> Self {
+        let edges: Vec<_> = (0..n.saturating_sub(1)).map(|i| (i, i + 1)).collect();
+        Self {
+            kind: TopologyKind::Linear,
+            edges,
+        }
+    }
+
+    /// Create a star topology.
+    pub fn star(n: u32) -> Self {
+        let edges: Vec<_> = (1..n).map(|i| (0, i)).collect();
+        Self {
+            kind: TopologyKind::Star,
+            edges,
+        }
+    }
+
+    /// Create a fully connected topology.
+    pub fn full(n: u32) -> Self {
+        let mut edges = vec![];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                edges.push((i, j));
+            }
+        }
+        Self {
+            kind: TopologyKind::FullyConnected,
+            edges,
+        }
+    }
+
+    /// Create a grid topology.
+    pub fn grid(rows: u32, cols: u32) -> Self {
+        let mut edges = vec![];
+        for r in 0..rows {
+            for c in 0..cols {
+                let idx = r * cols + c;
+                if c + 1 < cols {
+                    edges.push((idx, idx + 1));
+                }
+                if r + 1 < rows {
+                    edges.push((idx, idx + cols));
+                }
+            }
+        }
+        Self {
+            kind: TopologyKind::Grid { rows, cols },
+            edges,
+        }
+    }
+
+    /// Create a custom topology from edges.
+    pub fn custom(edges: Vec<(u32, u32)>) -> Self {
+        Self {
+            kind: TopologyKind::Custom,
+            edges,
+        }
+    }
+
+    /// Create a neutral-atom topology with zones.
+    ///
+    /// Qubits within a zone are fully connected (Rydberg interaction radius).
+    /// Qubits across zones require shuttling.
+    pub fn neutral_atom(num_qubits: u32, zones: u32) -> Self {
+        let qubits_per_zone = num_qubits / zones.max(1);
+        let mut edges = vec![];
+
+        for z in 0..zones {
+            let start = z * qubits_per_zone;
+            let end = if z == zones - 1 {
+                num_qubits
+            } else {
+                start + qubits_per_zone
+            };
+            for i in start..end {
+                for j in (i + 1)..end {
+                    edges.push((i, j));
+                }
+            }
+        }
+
+        Self {
+            kind: TopologyKind::NeutralAtom { zones },
+            edges,
+        }
+    }
+
+    /// Check if two qubits are connected.
+    pub fn is_connected(&self, q1: u32, q2: u32) -> bool {
+        self.edges
+            .iter()
+            .any(|&(a, b)| (a == q1 && b == q2) || (a == q2 && b == q1))
+    }
+}
+
+/// Kind of qubit topology.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TopologyKind {
+    /// Fully connected (all-to-all).
+    FullyConnected,
+    /// Linear chain.
+    Linear,
+    /// Star topology (center connected to all).
+    Star,
+    /// 2D grid.
+    Grid { rows: u32, cols: u32 },
+    /// Heavy-hex lattice (IBM Heron/Eagle processors).
+    HeavyHex,
+    /// Custom topology.
+    Custom,
+    /// Neutral-atom topology with reconfigurable zones.
+    NeutralAtom {
+        /// Number of interaction zones.
+        zones: u32,
+    },
+}
+
+/// Device-wide noise averages reported by a backend.
+///
+/// These are aggregate characterization numbers — suitable for routing
+/// and coarse-grained compilation decisions.
+///
+/// All fidelity values are in `[0.0, 1.0]` where `1.0` means perfect.
+/// Time values (T1, T2, gate_time) are in **microseconds**.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoiseProfile {
+    /// T1 relaxation time (device average, microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t1: Option<f64>,
+    /// T2 dephasing time (device average, microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t2: Option<f64>,
+    /// Average single-qubit gate fidelity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_qubit_fidelity: Option<f64>,
+    /// Average two-qubit gate fidelity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub two_qubit_fidelity: Option<f64>,
+    /// Average readout fidelity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readout_fidelity: Option<f64>,
+    /// Average gate execution time (microseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_time: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_capabilities_simulator() {
+        let caps = Capabilities::simulator(10);
+        assert!(caps.is_simulator);
+        assert_eq!(caps.num_qubits, 10);
+        assert!(caps.gate_set.contains("h"));
+    }
+
+    #[test]
+    fn test_capabilities_iqm() {
+        let caps = Capabilities::iqm("Garnet", 20);
+        assert!(!caps.is_simulator);
+        assert!(caps.gate_set.contains("prx"));
+        assert!(caps.gate_set.contains("cz"));
+        assert!(!caps.gate_set.contains("cx"));
+    }
+
+    #[test]
+    fn test_topology_linear() {
+        let topo = Topology::linear(5);
+        assert!(topo.is_connected(0, 1));
+        assert!(topo.is_connected(1, 2));
+        assert!(!topo.is_connected(0, 2));
+    }
+
+    #[test]
+    fn test_topology_star() {
+        let topo = Topology::star(5);
+        assert!(topo.is_connected(0, 1));
+        assert!(topo.is_connected(0, 4));
+        assert!(!topo.is_connected(1, 2));
+    }
+
+    #[test]
+    fn test_topology_grid() {
+        let topo = Topology::grid(2, 3);
+        assert!(topo.is_connected(0, 1));
+        assert!(topo.is_connected(1, 2));
+        assert!(topo.is_connected(0, 3));
+        assert!(topo.is_connected(1, 4));
+        assert!(!topo.is_connected(0, 4));
+    }
+
+    #[test]
+    fn test_topology_neutral_atom() {
+        let topo = Topology::neutral_atom(6, 2);
+        assert_eq!(topo.kind, TopologyKind::NeutralAtom { zones: 2 });
+        assert!(topo.is_connected(0, 1));
+        assert!(topo.is_connected(0, 2));
+        assert!(topo.is_connected(1, 2));
+        assert!(topo.is_connected(3, 4));
+        assert!(topo.is_connected(3, 5));
+        assert!(topo.is_connected(4, 5));
+        assert!(!topo.is_connected(2, 3));
+        assert!(!topo.is_connected(0, 5));
+    }
+
+    #[test]
+    fn test_gate_set_is_native() {
+        let gs = GateSet {
+            single_qubit: vec!["h".into(), "rx".into()],
+            two_qubit: vec!["cx".into()],
+            three_qubit: vec![],
+            native: vec!["rx".into(), "cx".into()],
+        };
+        assert!(gs.is_native("rx"));
+        assert!(gs.is_native("cx"));
+        assert!(!gs.is_native("h"));
+    }
+
+    #[test]
+    fn test_gate_set_is_native_empty_native_list() {
+        let gs = GateSet {
+            single_qubit: vec!["h".into()],
+            two_qubit: vec!["cx".into()],
+            three_qubit: vec![],
+            native: vec![],
+        };
+        assert!(gs.is_native("h"));
+        assert!(gs.is_native("cx"));
+        assert!(!gs.is_native("cz"));
+    }
+}

@@ -1,0 +1,26 @@
+# Rust
+/rust/target/
+/examples/*/target/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Haskell
+dist-newstyle/
+.stack-work/
+*.hi
+*.o
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

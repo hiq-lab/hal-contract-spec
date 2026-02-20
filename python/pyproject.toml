@@ -1,0 +1,13 @@
+[project]
+name = "hal-contract"
+version = "0.1.0"
+description = "HAL Contract — Orchestration Interface Specification for Quantum-HPC Workflows"
+readme = "../README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+keywords = ["quantum", "backend", "hardware", "abstraction", "hal"]
+
+[project.urls]
+Homepage = "https://hal-contract.org"
+Repository = "https://github.com/hiq-lab/hal-contract-spec"
+Specification = "https://github.com/hiq-lab/hal-contract-spec/blob/main/spec/v2.md"
