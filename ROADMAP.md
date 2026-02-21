@@ -1,10 +1,10 @@
 # HAL Contract — Backend Integration Roadmap
 
-**Last updated:** 2026-02-20
+**Last updated:** 2026-02-21
 
 ## Current Integrations
 
-Seven production-ready adapters ship with [Arvak](https://arvak.io), the reference implementation:
+Nine production-ready adapters ship with [Arvak](https://arvak.io), the reference implementation:
 
 | Adapter | QPUs | Technology | Access |
 |---------|------|------------|--------|
@@ -15,13 +15,24 @@ Seven production-ready adapters ship with [Arvak](https://arvak.io), the referen
 | **AWS Braket** | Rigetti Ankaa-3, IonQ Aria/Forte, IQM, SV1/TN1/DM1 | Multi-vendor | AWS credentials |
 | **NVIDIA CUDA-Q** | cuStateVec, TensorNet, Density Matrix (GPU) | Simulation | API token |
 | **QDMI (MQSS)** | Any QDMI v1.2.1+ device at LRZ/JSC | Standard FFI | Token / OIDC |
+| **Quantinuum** | H1 (20q), H2 (32q), H2-1LE emulator (free) | Trapped ion | Email + password |
+| **AQT** | IBEX Q1 (12q), offline simulator (20q) | Trapped ion | API token |
 
-## Phase 1 — Quantinuum (H2 / Helios)
+## ✅ Phase 1 — Quantinuum (H2 / Helios) — Complete
 
-**Target:** Q1 2026
-**Priority:** Highest
+**Completed:** 2026-02-20
+**Adapter:** `adapters/arvak-adapter-quantinuum/`
 
 Quantinuum operates the highest-fidelity quantum hardware commercially available. Helios (3rd generation) delivers 98 barium-ion qubits at 99.92% two-qubit entanglement fidelity — the most accurate quantum computer in the world as of late 2025. The H2 system holds the Quantum Volume record at 33,554,432.
+
+**What was built:**
+- Direct Quantinuum REST API adapter (no pytket/qnexus dependency)
+- QASM2 emitter with inline gate definitions for PRX/ECR/ISwap
+- All-to-all topology — no routing needed; cloud compiles to ZZMax/ZZPhase/U1q/Rz
+- H1-1E, H2-1E emulators and H2-1 hardware backends
+- Auth: `POST /login` → JWT; `Authorization: {id-token}` (no "Bearer" prefix)
+- Python: `ArvakQuantinuumBackend` + HAL-compliant job/result wrappers
+- Demo: `demos/quantinuum_test.py` — Bell state on H2-1LE, verified ≥90% Bell fraction
 
 **Why it matters for HAL Contract:**
 - All-to-all connectivity (no SWAP routing overhead)
@@ -33,20 +44,25 @@ Quantinuum operates the highest-fidelity quantum hardware commercially available
 - Native gates: Rz, U1q (single-qubit), ZZPhase (two-qubit)
 - Trapped-ion architecture, ytterbium (H2) / barium (Helios) ions
 - T2 coherence times ~seconds (1000x longer than superconducting)
-- Supports OpenQASM, pytket/TKET compiler
-
-**Access path:** Azure Quantum REST API ($500 free credits per provider) or pytket-quantinuum direct SDK. Cambridge UK company (Honeywell/Cambridge Quantum Computing spin-off).
-
-**Adapter approach:** Azure Quantum unified REST adapter, or pytket-based FFI integration for native compilation support.
 
 **Roadmap:** Sol (192 qubits, 2027), Apollo (thousands of qubits, fault-tolerant, 2029).
 
-## Phase 2 — AQT (Alpine Quantum Technologies)
+## ✅ Phase 2 — AQT (Alpine Quantum Technologies) — Complete
 
-**Target:** Q2 2026
-**Priority:** High
+**Completed:** 2026-02-21
+**Adapter:** `adapters/arvak-adapter-aqt/`
 
 Austrian company based in Innsbruck. Hardware physically located in the EU — real data sovereignty. The IBEX Q1 system is rack-mountable (two 19-inch racks, <2kW power), specifically designed for HPC center deployment.
+
+**What was built:**
+- Direct AQT Arnica REST API adapter (JSON circuit format, no QASM)
+- Gate serialiser: Rz→RZ (φ=angle/π), PRX→R (θ/π, -φ/π rem_euclid 2.0), RXX→RXX (θ/π)
+- Auth: standard Bearer token (`Authorization: Bearer <token>`)
+- Cancel: `DELETE /jobs/{job_id}` (204 success, 208 already cancelled)
+- `GateSet::aqt()` and `Capabilities::aqt()` added to arvak-hal
+- Python: `ArvakAQTBackend` + HAL-compliant job/result wrappers
+- 27 unit tests passing
+- Demo: `demos/aqt_test.py` — Bell state on offline simulator (requires AQT account token)
 
 **Why it matters for HAL Contract:**
 - EU data sovereignty — hardware in Austria
@@ -57,14 +73,11 @@ Austrian company based in Innsbruck. Hardware physically located in the EU — r
 **Technical details:**
 - IBEX Q1: 12 qubits, calcium-40 ions, fully connected
 - PINE: Table-top system scaling to 50 qubits
-- Native gates: MS (Molmer-Sorensen), arbitrary single-qubit rotations
+- Native gates: RZ (virtual Z), R (phased-X), RXX (Mølmer-Sørensen)
 - All-to-all connectivity (like Quantinuum, unlike superconducting)
+- Angles in units of π throughout the API
 
-**Access path:** Already reachable via existing Braket adapter (eu-north-1 Stockholm region) and Scaleway. A direct adapter enables HPC-native OIDC authentication for institutional deployments.
-
-**Adapter approach:** Direct REST API adapter with OIDC support for HPC centers. Braket adapter provides interim coverage.
-
-## Phase 3 — planqc (Munich)
+## Phase 1 — planqc (Munich)
 
 **Target:** Q2–Q3 2026
 **Priority:** High (strategic)
@@ -87,7 +100,7 @@ German company headquartered in Munich. Deploying at LRZ Garching through the Mu
 
 **Adapter approach:** QDMI adapter (already implemented) should provide coverage once planqc's QDMI driver is available. Custom adapter if planqc exposes a direct API.
 
-## Phase 4 — PASQAL (Paris)
+## Phase 2 — PASQAL (Paris)
 
 **Target:** Q3 2026
 **Priority:** Medium
@@ -110,7 +123,7 @@ Key European neutral-atom company based in Paris. 100+ qubit Orion Alpha system 
 
 **Adapter approach:** Pulser-based adapter when digital mode matures. Consider an analog mode extension to the spec if demand justifies it.
 
-## Phase 5 — Quandela (Paris)
+## Phase 3 — Quandela (Paris)
 
 **Target:** Q4 2026
 **Priority:** Medium-low
