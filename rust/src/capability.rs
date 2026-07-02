@@ -36,6 +36,10 @@ pub struct Capabilities {
     pub topology: Topology,
     /// Maximum number of shots per job.
     pub max_shots: u32,
+    /// Maximum gate operations per circuit. `None` means no backend-imposed
+    /// limit (HAL Contract v2.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_circuit_ops: Option<u32>,
     /// Whether this is a simulator (not real hardware).
     pub is_simulator: bool,
     /// Additional features supported by this backend.
@@ -55,6 +59,7 @@ impl Capabilities {
             gate_set: GateSet::universal(),
             topology: Topology::full(num_qubits),
             max_shots: 100_000,
+            max_circuit_ops: None,
             is_simulator: true,
             features: vec!["statevector".into(), "unitary".into()],
             noise_profile: None,
@@ -69,6 +74,7 @@ impl Capabilities {
             gate_set: GateSet::iqm(),
             topology: Topology::star(num_qubits),
             max_shots: 20_000,
+            max_circuit_ops: None,
             is_simulator: false,
             features: vec![],
             noise_profile: None,
@@ -83,6 +89,7 @@ impl Capabilities {
             gate_set: GateSet::ibm_eagle(),
             topology: Topology::custom(vec![]), // Use with_topology() for real connectivity
             max_shots: 100_000,
+            max_circuit_ops: None,
             is_simulator: false,
             features: vec!["dynamic_circuits".into()],
             noise_profile: None,
@@ -97,6 +104,7 @@ impl Capabilities {
             gate_set: GateSet::ibm_heron(),
             topology: Topology::custom(vec![]), // Use with_topology() for real connectivity
             max_shots: 100_000,
+            max_circuit_ops: None,
             is_simulator: false,
             features: vec!["dynamic_circuits".into()],
             noise_profile: None,
@@ -111,6 +119,7 @@ impl Capabilities {
             gate_set: GateSet::neutral_atom(),
             topology: Topology::neutral_atom(num_qubits, zones),
             max_shots: 100_000,
+            max_circuit_ops: None,
             is_simulator: false,
             features: vec!["shuttling".into(), "zoned".into()],
             noise_profile: None,
@@ -128,6 +137,7 @@ impl Capabilities {
                 f64::from(num_qubits).sqrt().ceil() as u32,
             ),
             max_shots: 100_000,
+            max_circuit_ops: None,
             is_simulator: false,
             features: vec![],
             noise_profile: None,
@@ -142,8 +152,45 @@ impl Capabilities {
             gate_set: GateSet::ionq(),
             topology: Topology::full(num_qubits),
             max_shots: 100_000,
+            max_circuit_ops: None,
             is_simulator: false,
             features: vec![],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for Quantinuum H1/H2 ion-trap devices.
+    ///
+    /// All Quantinuum hardware has all-to-all qubit connectivity.
+    pub fn quantinuum(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::quantinuum(),
+            topology: Topology::full(num_qubits),
+            max_shots: 10_000,
+            max_circuit_ops: None,
+            is_simulator: false,
+            features: vec!["ion_trap".into(), "mid_circuit_measurement".into()],
+            noise_profile: None,
+        }
+    }
+
+    /// Create capabilities for AQT (Alpine Quantum Technologies) ion-trap
+    /// devices.
+    ///
+    /// AQT hardware and simulators have all-to-all qubit connectivity.
+    /// Maximum: 2000 shots and 2000 operations per circuit.
+    pub fn aqt(name: impl Into<String>, num_qubits: u32) -> Self {
+        Self {
+            name: name.into(),
+            num_qubits,
+            gate_set: GateSet::aqt(),
+            topology: Topology::full(num_qubits),
+            max_shots: 2_000,
+            max_circuit_ops: Some(2_000),
+            is_simulator: false,
+            features: vec!["ion_trap".into()],
             noise_profile: None,
         }
     }
@@ -183,6 +230,47 @@ pub struct GateSet {
 }
 
 impl GateSet {
+    /// Create Quantinuum gate set (H1/H2 ion-trap processors).
+    ///
+    /// Quantinuum's cloud service accepts standard QASM 2.0 gates and
+    /// compiles them to its native ion-trap gate set (ZZMax/ZZPhase/U1q/Rz)
+    /// internally. `rz` is listed as the only native gate because it
+    /// executes as a virtual Z rotation (zero hardware cost).
+    pub fn quantinuum() -> Self {
+        Self {
+            single_qubit: vec![
+                "rz".into(),
+                "rx".into(),
+                "ry".into(),
+                "h".into(),
+                "x".into(),
+                "y".into(),
+                "z".into(),
+                "s".into(),
+                "t".into(),
+                "sdg".into(),
+                "tdg".into(),
+                "sx".into(),
+            ],
+            two_qubit: vec!["cx".into(), "cz".into(), "swap".into()],
+            three_qubit: vec!["ccx".into()],
+            native: vec!["rz".into()],
+        }
+    }
+
+    /// Create AQT (Alpine Quantum Technologies) gate set.
+    ///
+    /// AQT native gates: `rz` (Z rotation), `prx` (phased-X / R gate),
+    /// `rxx` (Mølmer-Sørensen XX rotation). Angles are in units of π.
+    pub fn aqt() -> Self {
+        Self {
+            single_qubit: vec!["rz".into(), "prx".into()],
+            two_qubit: vec!["rxx".into()],
+            three_qubit: vec![],
+            native: vec!["rz".into(), "prx".into(), "rxx".into()],
+        }
+    }
+
     /// Create IQM gate set (PRX + CZ native).
     pub fn iqm() -> Self {
         Self {
@@ -571,5 +659,39 @@ mod tests {
         assert!(gs.is_native("h"));
         assert!(gs.is_native("cx"));
         assert!(!gs.is_native("cz"));
+    }
+
+    #[test]
+    fn test_capabilities_quantinuum() {
+        let caps = Capabilities::quantinuum("H2-1", 32);
+        assert!(!caps.is_simulator);
+        assert_eq!(caps.max_shots, 10_000);
+        assert_eq!(caps.max_circuit_ops, None);
+        assert!(caps.gate_set.contains("cx"));
+        assert!(caps.gate_set.is_native("rz"));
+        assert!(!caps.gate_set.is_native("cx"));
+        assert!(
+            caps.features
+                .contains(&"mid_circuit_measurement".to_string())
+        );
+        assert!(caps.topology.is_connected(0, 31));
+    }
+
+    #[test]
+    fn test_capabilities_aqt() {
+        let caps = Capabilities::aqt("IBEX Q1", 12);
+        assert!(!caps.is_simulator);
+        assert_eq!(caps.max_shots, 2_000);
+        assert_eq!(caps.max_circuit_ops, Some(2_000));
+        assert!(caps.gate_set.contains("prx"));
+        assert!(caps.gate_set.contains("rxx"));
+        assert!(!caps.gate_set.contains("cx"));
+        assert!(caps.topology.is_connected(0, 11));
+    }
+
+    #[test]
+    fn test_max_circuit_ops_default_none() {
+        assert_eq!(Capabilities::simulator(10).max_circuit_ops, None);
+        assert_eq!(Capabilities::iqm("Garnet", 20).max_circuit_ops, None);
     }
 }

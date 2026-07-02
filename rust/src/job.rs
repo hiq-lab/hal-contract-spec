@@ -5,7 +5,7 @@
 //! The job state machine:
 //!
 //! ```text
-//!   submit() ──→ Queued ──→ Running ──→ Completed
+//!   submit() ──→ Queued ──→ Running ──→ Completed ──→ ResultExpired
 //!                  │           │
 //!                  │           ├──→ Failed(reason)
 //!                  │           │
@@ -13,9 +13,14 @@
 //! ```
 //!
 //! **Invariants:**
-//! - `submit()` MUST return `Queued`.
-//! - Transitions are monotonic — a job never moves backward.
-//! - Terminal states (`Completed`, `Failed`, `Cancelled`) are permanent.
+//! - A job created by `submit()` starts in `Queued`. Synchronous backends
+//!   MAY complete before the first `status()` call — `Queued` is the initial
+//!   recorded state, not a guaranteed observation.
+//! - Transitions are monotonic — a job never moves backward or re-enters
+//!   execution.
+//! - `Failed`, `Cancelled`, and `ResultExpired` are permanent.
+//! - `Completed` is terminal for execution, but MAY transition to
+//!   `ResultExpired` if the backend purges results after a retention window.
 //! - `result()` is only valid when status is `Completed`.
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +67,11 @@ pub enum JobStatus {
     Failed(String),
     /// Job was cancelled.
     Cancelled,
+    /// Job completed but results are no longer available (e.g. the backend
+    /// has a retention window). Only reachable from `Completed`; distinct
+    /// from `Failed` — the job ran successfully. `result()` MUST return
+    /// `HalError::ResultExpired` in this state.
+    ResultExpired,
 }
 
 impl JobStatus {
@@ -69,7 +79,10 @@ impl JobStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
+            JobStatus::Completed
+                | JobStatus::Failed(_)
+                | JobStatus::Cancelled
+                | JobStatus::ResultExpired
         )
     }
 
@@ -92,6 +105,7 @@ impl std::fmt::Display for JobStatus {
             JobStatus::Completed => write!(f, "Completed"),
             JobStatus::Failed(msg) => write!(f, "Failed: {msg}"),
             JobStatus::Cancelled => write!(f, "Cancelled"),
+            JobStatus::ResultExpired => write!(f, "ResultExpired"),
         }
     }
 }
@@ -107,6 +121,14 @@ mod tests {
         assert!(JobStatus::Completed.is_terminal());
         assert!(JobStatus::Failed("error".into()).is_terminal());
         assert!(JobStatus::Cancelled.is_terminal());
+        assert!(JobStatus::ResultExpired.is_terminal());
+    }
+
+    #[test]
+    fn test_result_expired_is_not_success_or_pending() {
+        assert!(!JobStatus::ResultExpired.is_success());
+        assert!(!JobStatus::ResultExpired.is_pending());
+        assert_eq!(JobStatus::ResultExpired.to_string(), "ResultExpired");
     }
 
     #[test]
