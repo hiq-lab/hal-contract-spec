@@ -8,7 +8,7 @@
 //! |----------|----------|----------|
 //! | **Transient** | `BackendUnavailable`, `Timeout` | Retry with backoff |
 //! | **Permanent** | `InvalidCircuit`, `CircuitTooLarge`, `InvalidShots`, `Unsupported` | Fix input |
-//! | **Job-level** | `JobFailed`, `JobCancelled`, `JobNotFound` | Resubmit or abort |
+//! | **Job-level** | `SubmissionFailed`, `JobFailed`, `JobCancelled`, `JobNotFound`, `ResultExpired` | Resubmit or abort |
 //! | **Auth** | `AuthenticationFailed` | Re-authenticate |
 //! | **Config** | `Configuration`, `Backend` | Fix configuration |
 
@@ -16,7 +16,7 @@ use thiserror::Error;
 
 /// Errors that can occur in HAL operations.
 ///
-/// All 13 spec variants are present. Implementations may wrap additional
+/// All 14 spec variants are present. Implementations may wrap additional
 /// backend-specific errors in the `Backend` variant.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -63,6 +63,11 @@ pub enum HalError {
     /// Job not found.
     #[error("Job not found: {0}")]
     JobNotFound(String),
+
+    /// Job completed but results were purged by the backend (terminal —
+    /// resubmit to obtain new results). See `JobStatus::ResultExpired`.
+    #[error("Result expired for job {0}")]
+    ResultExpired(String),
 
     // ── Auth errors ──────────────────────────────────────────────────
     /// Authentication failed (re-authenticate).

@@ -28,12 +28,13 @@
 //! | `name()` | sync | yes | `&str` |
 //! | `capabilities()` | sync | yes | `&Capabilities` |
 //! | `availability()` | async | yes | `HalResult<BackendAvailability>` |
-//! | `validate()` | async | yes | `HalResult<ValidationResult>` |
-//! | `submit()` | async | yes | `HalResult<JobId>` |
-//! | `status()` | async | yes | `HalResult<JobStatus>` |
-//! | `result()` | async | yes | `HalResult<ExecutionResult>` |
-//! | `cancel()` | async | yes | `HalResult<()>` |
-//! | `wait()` | async | provided | `HalResult<ExecutionResult>` |
+//! | `validate(circuit, shots)` | async | yes | `HalResult<ValidationResult>` |
+//! | `submit(circuit, shots)` | async | yes | `HalResult<JobId>` |
+//! | `status(job_id)` | async | yes | `HalResult<JobStatus>` |
+//! | `result(job_id)` | async | yes | `HalResult<ExecutionResult>` |
+//! | `cancel(job_id)` | async | yes | `HalResult<()>` |
+//! | `wait(job_id)` | async | provided | `HalResult<ExecutionResult>` |
+//! | `submit_with_parameters(circuit, shots, parameters)` | async | provided | `HalResult<JobId>` |
 
 use std::time::Duration;
 
@@ -65,7 +66,7 @@ use crate::result::ExecutionResult;
 /// - `result()` MUST only be called when status is `Completed`.
 /// - `wait()` has a default implementation (500ms poll, 5-minute timeout).
 #[async_trait]
-pub trait Backend<C>: Send + Sync {
+pub trait Backend<C: Sync>: Send + Sync {
     /// Get the name of this backend.
     fn name(&self) -> &str;
 
@@ -82,22 +83,51 @@ pub trait Backend<C>: Send + Sync {
     /// intelligent routing decisions by schedulers.
     async fn availability(&self) -> HalResult<BackendAvailability>;
 
-    /// Validate a circuit against backend constraints.
+    /// Validate a circuit and shot count against backend constraints.
     ///
-    /// SHOULD check at minimum:
+    /// Per §3.3 rule 3, MUST check at minimum:
     /// - Qubit count vs `capabilities().num_qubits`
+    /// - Shot count vs `capabilities().max_shots`
     /// - Gate support vs `capabilities().gate_set`
+    /// - Total operation count vs `capabilities().max_circuit_ops` (if set)
     ///
     /// Returns a three-state result: `Valid`, `Invalid`, or
     /// `RequiresTranspilation`. The third state lets an orchestrator
     /// decide to compile and retry vs. route elsewhere.
-    async fn validate(&self, circuit: &C) -> HalResult<ValidationResult>;
+    async fn validate(&self, circuit: &C, shots: u32) -> HalResult<ValidationResult>;
 
     /// Submit a circuit for execution.
     ///
     /// Returns a job ID that can be used to check status and retrieve results.
-    /// The job MUST start in `Queued` status.
+    /// The job MUST start in `Queued` status. Per §3.3 rule 4, implementations
+    /// MUST call `validate()` internally and return `HalError::InvalidCircuit`
+    /// without submitting if the circuit would produce
+    /// `ValidationResult::Invalid`.
     async fn submit(&self, circuit: &C, shots: u32) -> HalResult<JobId>;
+
+    /// Submit a parametric circuit with concrete parameter bindings
+    /// (§3.3 rule 8).
+    ///
+    /// `parameters` maps OpenQASM 3.0 `input float[64]` parameter names to
+    /// concrete values. The default implementation delegates to `submit()`
+    /// when `parameters` is empty and returns `HalError::Unsupported`
+    /// otherwise. Backends that support parametric execution SHOULD
+    /// override it; overrides carry the same validation obligations as
+    /// `submit()` (rule 4).
+    async fn submit_with_parameters(
+        &self,
+        circuit: &C,
+        shots: u32,
+        parameters: &std::collections::HashMap<String, f64>,
+    ) -> HalResult<JobId> {
+        if parameters.is_empty() {
+            self.submit(circuit, shots).await
+        } else {
+            Err(crate::error::HalError::Unsupported(
+                "parametric circuits are not supported by this backend".into(),
+            ))
+        }
+    }
 
     /// Get the status of a job.
     async fn status(&self, job_id: &JobId) -> HalResult<JobStatus>;
@@ -127,6 +157,9 @@ pub trait Backend<C>: Send + Sync {
                 JobStatus::Completed => return self.result(job_id).await,
                 JobStatus::Failed(msg) => return Err(HalError::JobFailed(msg)),
                 JobStatus::Cancelled => return Err(HalError::JobCancelled),
+                JobStatus::ResultExpired => {
+                    return Err(HalError::ResultExpired(job_id.0.clone()));
+                }
                 JobStatus::Queued | JobStatus::Running => {
                     sleep(poll_interval).await;
                 }
@@ -148,9 +181,10 @@ pub struct BackendAvailability {
     pub is_available: bool,
     /// Number of jobs currently in queue (if known).
     pub queue_depth: Option<u32>,
-    /// Estimated wait time for a new job in seconds (if known).
+    /// Estimated wait time for a new job (if known). §4.5: Rust
+    /// implementations use `std::time::Duration`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_wait_secs: Option<f64>,
+    pub estimated_wait: Option<Duration>,
     /// Human-readable status message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
@@ -164,7 +198,7 @@ impl BackendAvailability {
         Self {
             is_available: true,
             queue_depth: Some(0),
-            estimated_wait_secs: Some(0.0),
+            estimated_wait: Some(Duration::ZERO),
             status_message: None,
         }
     }
@@ -174,7 +208,7 @@ impl BackendAvailability {
         Self {
             is_available: false,
             queue_depth: None,
-            estimated_wait_secs: None,
+            estimated_wait: None,
             status_message: Some(reason.into()),
         }
     }

@@ -67,6 +67,14 @@ class JobNotFoundError(HalError):
     """Job not found."""
 
 
+class ResultExpiredError(HalError):
+    """Job completed but results are no longer available (terminal).
+
+    Raised by ``result()`` when the job status is RESULT_EXPIRED —
+    the backend purged results after its retention window.
+    """
+
+
 class AuthenticationFailedError(HalError):
     """Authentication failed."""
 
@@ -94,11 +102,16 @@ class JobStatus(Enum):
 
     State machine::
 
-        submit() ──→ QUEUED ──→ RUNNING ──→ COMPLETED
+        submit() ──→ QUEUED ──→ RUNNING ──→ COMPLETED ──→ RESULT_EXPIRED
                        │           │
                        │           ├──→ FAILED
                        │           │
                        └───────────┴──→ CANCELLED
+
+    RESULT_EXPIRED is only reachable from COMPLETED: the job ran
+    successfully but the backend purged the results (e.g. after a 24h
+    retention window). It is distinct from FAILED. COMPLETED is terminal
+    for execution but MAY still transition to RESULT_EXPIRED.
     """
 
     QUEUED = auto()
@@ -106,10 +119,16 @@ class JobStatus(Enum):
     COMPLETED = auto()
     FAILED = auto()
     CANCELLED = auto()
+    RESULT_EXPIRED = auto()
 
     @property
     def is_terminal(self) -> bool:
-        return self in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        return self in (
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.RESULT_EXPIRED,
+        )
 
     @property
     def is_pending(self) -> bool:
@@ -231,6 +250,23 @@ class GateSet:
             native=["rz", "rx", "ry", "cz"],
         )
 
+    @staticmethod
+    def quantinuum() -> GateSet:
+        return GateSet(
+            single_qubit=["rz", "rx", "ry", "h", "x", "y", "z", "s", "t", "sdg", "tdg", "sx"],
+            two_qubit=["cx", "cz", "swap"],
+            three_qubit=["ccx"],
+            native=["rz"],
+        )
+
+    @staticmethod
+    def aqt() -> GateSet:
+        return GateSet(
+            single_qubit=["rz", "prx"],
+            two_qubit=["rxx"],
+            native=["rz", "prx", "rxx"],
+        )
+
 
 @dataclass
 class Topology:
@@ -287,6 +323,7 @@ class Capabilities:
     topology: Topology
     max_shots: int
     is_simulator: bool
+    max_circuit_ops: int | None = None
     features: list[str] = field(default_factory=list)
     noise_profile: NoiseProfile | None = None
 
@@ -311,6 +348,31 @@ class Capabilities:
             topology=Topology.star(num_qubits),
             max_shots=20_000,
             is_simulator=False,
+        )
+
+    @staticmethod
+    def quantinuum(name: str, num_qubits: int) -> Capabilities:
+        return Capabilities(
+            name=name,
+            num_qubits=num_qubits,
+            gate_set=GateSet.quantinuum(),
+            topology=Topology.full(num_qubits),
+            max_shots=10_000,
+            is_simulator=False,
+            features=["ion_trap", "mid_circuit_measurement"],
+        )
+
+    @staticmethod
+    def aqt(name: str, num_qubits: int) -> Capabilities:
+        return Capabilities(
+            name=name,
+            num_qubits=num_qubits,
+            gate_set=GateSet.aqt(),
+            topology=Topology.full(num_qubits),
+            max_shots=2_000,
+            is_simulator=False,
+            max_circuit_ops=2_000,
+            features=["ion_trap"],
         )
 
 
@@ -459,13 +521,23 @@ class Backend(ABC, Generic[C]):
         ...
 
     @abstractmethod
-    async def validate(self, circuit: C) -> ValidationResult:
-        """Validate a circuit against backend constraints."""
+    async def validate(self, circuit: C, shots: int) -> ValidationResult:
+        """Validate a circuit against backend constraints.
+
+        MUST check at minimum: qubit count vs ``capabilities().num_qubits``,
+        shot count vs ``capabilities().max_shots``, gate support vs
+        ``capabilities().gate_set``, and — if ``capabilities().max_circuit_ops``
+        is set — total operation count vs that limit.
+        """
         ...
 
     @abstractmethod
     async def submit(self, circuit: C, shots: int) -> JobId:
-        """Submit a circuit for execution. Job MUST start in QUEUED status."""
+        """Submit a circuit for execution. Job MUST start in QUEUED status.
+
+        MUST call ``validate()`` internally before dispatching; if the
+        circuit is invalid, MUST raise InvalidCircuitError without submitting.
+        """
         ...
 
     @abstractmethod
@@ -475,7 +547,10 @@ class Backend(ABC, Generic[C]):
 
     @abstractmethod
     async def result(self, job_id: JobId) -> ExecutionResult:
-        """Get the result of a completed job. Only valid when status is COMPLETED."""
+        """Get the result of a completed job. Only valid when status is COMPLETED.
+
+        If the job status is RESULT_EXPIRED, MUST raise ResultExpiredError.
+        """
         ...
 
     @abstractmethod
@@ -496,5 +571,23 @@ class Backend(ABC, Generic[C]):
                 raise JobFailedError(f"Job {job_id} failed")
             if s is JobStatus.CANCELLED:
                 raise JobCancelledError(f"Job {job_id} cancelled")
+            if s is JobStatus.RESULT_EXPIRED:
+                raise ResultExpiredError(f"Job {job_id} results expired")
             await asyncio.sleep(0.5)
         raise TimeoutError(f"Timeout waiting for job {job_id}")
+
+    async def submit_with_parameters(
+        self, circuit: C, shots: int, parameters: dict[str, float] | None
+    ) -> JobId:
+        """Submit a parametric circuit with named parameter values bound.
+
+        Default implementation delegates to ``submit()`` when ``parameters``
+        is empty or None, and raises UnsupportedError otherwise. Backends
+        that support parametric execution SHOULD override this; overrides
+        are subject to the same validation requirements as ``submit()``.
+        """
+        if not parameters:
+            return await self.submit(circuit, shots)
+        raise UnsupportedError(
+            f"Backend {self.name()!r} does not support parametric circuits"
+        )

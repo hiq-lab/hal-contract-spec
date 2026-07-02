@@ -49,25 +49,40 @@ impl Backend<SimpleCircuit> for MockBackend {
         Ok(BackendAvailability::always_available())
     }
 
-    async fn validate(&self, circuit: &SimpleCircuit) -> HalResult<ValidationResult> {
+    async fn validate(&self, circuit: &SimpleCircuit, shots: u32) -> HalResult<ValidationResult> {
+        let mut reasons = Vec::new();
+
         if circuit.num_qubits > self.capabilities.num_qubits {
-            return Ok(ValidationResult::Invalid {
-                reasons: vec![format!(
-                    "Circuit requires {} qubits, backend has {}",
-                    circuit.num_qubits, self.capabilities.num_qubits
-                )],
-            });
+            reasons.push(format!(
+                "Circuit requires {} qubits, backend has {}",
+                circuit.num_qubits, self.capabilities.num_qubits
+            ));
+        }
+
+        if shots == 0 || shots > self.capabilities.max_shots {
+            reasons.push(format!(
+                "shots must be 1..={}",
+                self.capabilities.max_shots
+            ));
         }
 
         for gate in &circuit.gates {
             if !self.capabilities.gate_set.contains(gate) {
-                return Ok(ValidationResult::Invalid {
-                    reasons: vec![format!("Unsupported gate: {gate}")],
-                });
+                reasons.push(format!("Unsupported gate: {gate}"));
             }
         }
 
-        Ok(ValidationResult::Valid)
+        if let Some(max_ops) = self.capabilities.max_circuit_ops {
+            if circuit.gates.len() as u32 > max_ops {
+                reasons.push(format!("Circuit exceeds {max_ops} operations"));
+            }
+        }
+
+        if reasons.is_empty() {
+            Ok(ValidationResult::Valid)
+        } else {
+            Ok(ValidationResult::Invalid { reasons })
+        }
     }
 
     async fn submit(&self, circuit: &SimpleCircuit, shots: u32) -> HalResult<JobId> {
@@ -76,6 +91,11 @@ impl Backend<SimpleCircuit> for MockBackend {
                 "shots must be 1..={}",
                 self.capabilities.max_shots
             )));
+        }
+
+        // Rule 4: submit routes through validate before dispatching.
+        if let ValidationResult::Invalid { reasons } = self.validate(circuit, shots).await? {
+            return Err(HalError::InvalidCircuit(reasons.join("; ")));
         }
 
         let id = {
@@ -150,8 +170,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gates: vec!["h".into(), "cx".into()],
     };
 
-    // Validate
-    let validation = backend.validate(&circuit).await?;
+    // Validate (circuit + shot count, per §3.3 rule 3)
+    let validation = backend.validate(&circuit, 1000).await?;
     println!("Valid: {}", validation.is_valid());
 
     // Submit
