@@ -13,7 +13,7 @@
 //! - [`GateSet`], [`Topology`], [`NoiseProfile`] for hardware introspection
 //! - [`JobId`] / [`JobStatus`] for job tracking
 //! - [`ExecutionResult`] / [`Counts`] for measurement results
-//! - [`HalError`] with 13 categorized error variants
+//! - [`HalError`] with 14 categorized error variants
 //!
 //! # The Backend Trait
 //!

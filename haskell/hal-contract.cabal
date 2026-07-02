@@ -1,9 +1,9 @@
 cabal-version:   3.0
 name:            hal-contract
-version:         0.1.0.0
+version:         0.2.0
 synopsis:        HAL Contract — Orchestration Interface Specification for Quantum-HPC Workflows
 description:
-  Haskell reference implementation of the HAL Contract v2 specification.
+  Haskell reference implementation of the HAL Contract v2 specification (v2.3).
   Provides type classes and data types for quantum backend orchestration.
 license:         Apache-2.0
 license-file:    ../LICENSE
